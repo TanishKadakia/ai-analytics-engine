@@ -54,6 +54,12 @@ SUPPORTED SCHEMAS:
 
 10. Filter / Table Query:
     {"operation": "filter", "conditions": [{"column": "<col>", "operator": "=="|">"|"<"|etc, "value": <val>}], "select_columns": ["<col1>", "<col2>"], "limit": <int>}
+
+11. Dataset Dimensions / Row and Column Counts:
+    {"operation": "dataset_info"}
+
+12. Column Names and Data Types / Schema:
+    {"operation": "schema"}
 """
 
 SYSTEM_PROMPT_EXPLAINER = """You are a senior data analyst presenting verified insights to business stakeholders.
@@ -73,18 +79,18 @@ CRITICAL RULES:
 def extract_dataset_metadata(df: pd.DataFrame) -> Dict[str, Any]:
     """Extract token-efficient schema and summary statistics for LLM context."""
     columns_meta = []
-    
+
     for col in df.columns:
         s = df[col]
         is_num = pd.api.types.is_numeric_dtype(s)
         is_date = pd.api.types.is_datetime64_any_dtype(s) or ("date" in str(col).lower() or "time" in str(col).lower())
-        
+
         info = {
             "name": str(col),
             "type": "numerical" if is_num else "datetime" if is_date else "categorical",
             "non_null_count": int(s.count()),
         }
-        
+
         if is_num:
             info["min"] = float(s.min()) if s.count() > 0 else None
             info["max"] = float(s.max()) if s.count() > 0 else None
@@ -93,9 +99,9 @@ def extract_dataset_metadata(df: pd.DataFrame) -> Dict[str, Any]:
             sample_unique = s.dropna().unique()[:6].tolist()
             info["sample_values"] = [str(x) for x in sample_unique]
             info["unique_count"] = int(s.nunique())
-            
+
         columns_meta.append(info)
-        
+
     return {
         "total_rows": int(len(df)),
         "total_columns": int(len(df.columns)),
@@ -109,14 +115,28 @@ def rule_based_fallback_parser(question: str, df: pd.DataFrame) -> Dict[str, Any
     columns = list(df.columns)
     num_cols = list(df.select_dtypes(include=[np.number]).columns)
     cat_cols = [c for c in columns if c not in num_cols]
-    
-    # 1. Missing values
-    if "missing" in q or "null" in q or "na" in q:
+
+    # 1. Dataset Dimensions / Shape / Row and Column Count
+    if (
+        re.search(r"\b(?:rows?\s+and\s+columns?|columns?\s+and\s+rows?|dataset\s+dimensions?|dataset\s+shape|dataset\s+size|how\s+many\s+rows|number\s+of\s+rows|row\s+count|total\s+rows|how\s+many\s+records|total\s+records)\b", q)
+        or ("rows" in q and "columns" in q and ("how many" in q or "count" in q or "number" in q or "what" in q or "total" in q))
+    ):
+        return {"operation": "dataset_info"}
+
+    # 2. Dataset Schema / Column Names & Types
+    if (
+        re.search(r"\b(?:data\s*types?|dtypes?|column\s+names?|columns?\s+and\s+types?|schema|list\s+(?:all\s+)?columns?)\b", q)
+        or ("column" in q and ("types" in q or "dtypes" in q or "names" in q or "what are" in q or "list" in q))
+    ):
+        return {"operation": "schema"}
+
+    # 3. Missing values (safely isolated with word boundaries)
+    if re.search(r"\b(?:missing|null|nulls|nan|nans|na|n/a)\b", q):
         for col in columns:
-            if col.lower() in q:
+            if re.search(r"\b" + re.escape(col.lower()) + r"\b", q):
                 return {"operation": "missing_values", "column": col}
         return {"operation": "missing_values"}
-        
+
     # 2. Outliers
     if "outlier" in q or "anomaly" in q or "anomalies" in q:
         for col in num_cols:
@@ -162,14 +182,14 @@ def rule_based_fallback_parser(question: str, df: pd.DataFrame) -> Dict[str, Any
     top_n_match = re.search(r"top\s+(\d+)", q)
     bottom_n_match = re.search(r"(?:bottom|lowest)\s+(\d+)", q)
     n_val = int(top_n_match.group(1)) if top_n_match else (int(bottom_n_match.group(1)) if bottom_n_match else 1)
-    
+
     is_highest = any(w in q for w in ["most", "highest", "top", "best", "max", "maximum", "greatest"])
     is_lowest = any(w in q for w in ["least", "lowest", "bottom", "worst", "min", "minimum"])
-    
+
     # Identify target value column and group column
     target_val_col = next((c for c in num_cols if c.lower() in q), None)
     target_group_col = next((c for c in cat_cols if c.lower() in q), None)
-    
+
     # Fallback to defaults if "revenue", "sales", "price" matches
     if not target_val_col and num_cols:
         for w in ["revenue", "sales", "price", "amount", "cost", "units", "rating", "spend"]:
@@ -179,7 +199,7 @@ def rule_based_fallback_parser(question: str, df: pd.DataFrame) -> Dict[str, Any
                 break
         if not target_val_col:
             target_val_col = num_cols[0]
-            
+
     if (is_highest or is_lowest or top_n_match or bottom_n_match or "by " in q or "per " in q or "which " in q):
         if not target_group_col and cat_cols:
             # Check for words like product, category, region
@@ -190,7 +210,7 @@ def rule_based_fallback_parser(question: str, df: pd.DataFrame) -> Dict[str, Any
                     break
             if not target_group_col:
                 target_group_col = cat_cols[0]
-                
+
         if target_group_col and target_val_col:
             agg = "mean" if any(w in q for w in ["average", "avg", "mean", "rating"]) else "sum"
             sort_dir = "ascending" if is_lowest else "descending"
@@ -214,13 +234,13 @@ def rule_based_fallback_parser(question: str, df: pd.DataFrame) -> Dict[str, Any
         "how many": "count", "count": "count",
         "unique": "nunique", "distinct": "nunique"
     }
-    
+
     detected_agg = None
     for k, v in agg_keyword_map.items():
         if k in q:
             detected_agg = v
             break
-            
+
     if detected_agg and target_val_col:
         return {
             "operation": "aggregate",
@@ -250,12 +270,12 @@ def parse_question_with_llm(
     model: str = "gpt-4o-mini"
 ) -> Tuple[Dict[str, Any], bool, Optional[str]]:
     """Translate natural-language query into structured JSON instruction.
-    
+
     Returns:
         tuple (instruction_dict, is_llm_generated, error_message)
     """
     metadata = extract_dataset_metadata(df)
-    
+
     # Check if OpenAI API key is available
     active_key = api_key or os.getenv("OPENAI_API_KEY")
     if not active_key or active_key.strip() == "" or active_key == "your_openai_api_key_here":
@@ -266,7 +286,7 @@ def parse_question_with_llm(
     try:
         from openai import OpenAI
         client = OpenAI(api_key=active_key)
-        
+
         user_prompt = f"""Dataset Metadata:
 {json.dumps(metadata, indent=2)}
 
@@ -284,7 +304,7 @@ Generate the structured JSON analytical instruction:"""
             response_format={"type": "json_object"},
             temperature=0.0,
         )
-        
+
         content = response.choices[0].message.content
         instruction = json.loads(content)
         return instruction, True, None
@@ -305,15 +325,15 @@ def explain_result_with_llm(
     """Generate professional explanation grounded in computed Pandas result."""
     if not result.success:
         return f"Could not complete analysis: {result.error}"
-        
+
     active_key = api_key or os.getenv("OPENAI_API_KEY")
-    
+
     # Prepare result summary
     if isinstance(result.summary_table, pd.DataFrame) and not result.summary_table.empty:
         summary_repr = result.summary_table.head(10).to_string(index=False)
     else:
         summary_repr = result.formatted_result
-        
+
     if not active_key or active_key.strip() == "" or active_key == "your_openai_api_key_here":
         # High quality deterministic explanation
         return generate_deterministic_explanation(question, instruction, result)
@@ -321,7 +341,7 @@ def explain_result_with_llm(
     try:
         from openai import OpenAI
         client = OpenAI(api_key=active_key)
-        
+
         user_prompt = f"""User Question:
 "{question}"
 
@@ -357,29 +377,56 @@ def generate_deterministic_explanation(
     result: AnalysisResult
 ) -> str:
     """Fallback generator that constructs exact factual explanations without LLM."""
+    if not result.success:
+        return f"Could not complete analysis: {result.error}"
+
     op = instruction.get("operation", "")
-    
+
     if op == "aggregate":
         col = instruction.get("column")
         agg = instruction.get("aggregation", "mean")
         val = result.data
-        formatted_val = f"{val:,.2f}" if isinstance(val, (int, float)) else str(val)
+        if agg in ("count", "nunique") or isinstance(val, (int, np.integer)):
+            formatted_val = f"{int(val):,}"
+        elif isinstance(val, (float, np.floating)):
+            formatted_val = f"{val:,.2f}"
+        else:
+            formatted_val = str(val)
         return f"The computed {agg} for **{col}** is **{formatted_val}**."
-        
-    elif op in ("groupby_aggregate", "ranking"):
-        group_col = instruction.get("group_column")
-        val_col = instruction.get("value_column")
+
+    elif op in ("groupby_aggregate", "ranking", "top_n", "bottom_n"):
+        group_col = instruction.get("group_column") or instruction.get("item_column")
+        val_col = instruction.get("value_column") or instruction.get("column")
         agg = instruction.get("aggregation", "sum")
-        if isinstance(result.summary_table, pd.DataFrame) and not result.summary_table.empty:
-            top_row = result.summary_table.iloc[0]
-            val = top_row.iloc[1]
+        df_tbl = result.summary_table if isinstance(result.summary_table, pd.DataFrame) else result.data
+        if isinstance(df_tbl, pd.DataFrame) and not df_tbl.empty:
+            limit = instruction.get("limit") or instruction.get("n") or instruction.get("top_n")
+
+            if limit and int(limit) > 1 and len(df_tbl) > 1:
+                ranked_items = []
+                for idx, (_, r) in enumerate(df_tbl.iterrows(), 1):
+                    cat_name = r.iloc[0]
+                    val_raw = r.iloc[1]
+                    if agg in ("count", "nunique") or isinstance(val_raw, (int, np.integer)):
+                        val_str = f"{int(val_raw):,}"
+                    elif isinstance(val_raw, (float, np.floating)):
+                        val_str = f"{val_raw:,.2f}"
+                    else:
+                        val_str = str(val_raw)
+                    ranked_items.append(f"{idx}. **{cat_name}** ({val_str})")
+                items_str = ", ".join(ranked_items)
+                return f"Top {len(df_tbl)} **{group_col}** by {agg} **{val_col}**: {items_str}."
+
+            top_row = df_tbl.iloc[0]
             cat = top_row.iloc[0]
-            formatted_val = f"{val:,.2f}" if isinstance(val, (int, float)) else str(val)
-            limit = instruction.get("limit")
-            if limit == 1 or "which" in question.lower() or "highest" in question.lower() or "most" in question.lower():
-                return f"**{cat}** has the highest {agg} {val_col} at **{formatted_val}**."
+            val = top_row.iloc[1]
+            formatted_val = f"{int(val):,}" if (agg in ("count", "nunique") or isinstance(val, (int, np.integer))) else (f"{val:,.2f}" if isinstance(val, (float, np.floating)) else str(val))
+
+            if limit == 1 or "which" in question.lower() or "highest" in question.lower() or "most" in question.lower() or "lowest" in question.lower() or "least" in question.lower():
+                superlative = "lowest" if ("lowest" in question.lower() or "least" in question.lower() or str(instruction.get("sort")).lower() in ("asc", "ascending")) else "highest"
+                return f"**{cat}** has the {superlative} {agg} {val_col} at **{formatted_val}**."
             else:
-                return f"Aggregated {agg} {val_col} grouped across {len(result.summary_table)} {group_col} categories. Top performer is **{cat}** with **{formatted_val}**."
+                return f"Aggregated {agg} {val_col} across {len(df_tbl)} {group_col} categories. Top performer is **{cat}** with **{formatted_val}**."
         return result.formatted_result
 
     elif op == "correlation":
@@ -388,7 +435,40 @@ def generate_deterministic_explanation(
     elif op == "time_series":
         date_col = instruction.get("date_column")
         val_col = instruction.get("value_column")
-        return f"Analyzed historical trend of **{val_col}** over time (**{date_col}**). Check the chart and table below for details."
+        agg = instruction.get("aggregation", "sum")
+        df_tbl = result.summary_table if isinstance(result.summary_table, pd.DataFrame) else result.data
+
+        if isinstance(df_tbl, pd.DataFrame) and not df_tbl.empty:
+            period_col = df_tbl.columns[0]
+            metric_col = df_tbl.columns[1] if len(df_tbl.columns) > 1 else period_col
+
+            total_val = float(df_tbl[metric_col].sum())
+            total_str = f"{total_val:,.2f}"
+
+            max_idx = df_tbl[metric_col].idxmax()
+            peak_period = str(df_tbl.loc[max_idx, period_col])
+            peak_val = float(df_tbl.loc[max_idx, metric_col])
+            peak_str = f"{peak_val:,.2f}"
+
+            min_idx = df_tbl[metric_col].idxmin()
+            min_period = str(df_tbl.loc[min_idx, period_col])
+            min_val = float(df_tbl.loc[min_idx, metric_col])
+            min_str = f"{min_val:,.2f}"
+
+            num_periods = len(df_tbl)
+
+            if agg == "sum":
+                return (
+                    f"Total **{val_col}** across {num_periods} periods is **{total_str}**. "
+                    f"Peak occurred in **{peak_period}** (**{peak_str}**), and lowest in **{min_period}** (**{min_str}**)."
+                )
+            else:
+                avg_val = float(df_tbl[metric_col].mean())
+                return (
+                    f"Average **{val_col}** across {num_periods} periods is **{avg_val:,.2f}** (Total: **{total_str}**). "
+                    f"Peak occurred in **{peak_period}** (**{peak_str}**), and lowest in **{min_period}** (**{min_str}**)."
+                )
+        return result.formatted_result
 
     elif op == "distribution":
         col = instruction.get("column")
@@ -400,5 +480,22 @@ def generate_deterministic_explanation(
     elif op == "outliers":
         col = instruction.get("column")
         return f"Outlier scan for **{col}**: {result.formatted_result}"
+
+    elif op in ("dataset_info", "shape", "dimensions"):
+        if isinstance(result.data, dict):
+            rows = result.data.get("rows", len(result.summary_table) if isinstance(result.summary_table, pd.DataFrame) else 0)
+            cols = result.data.get("columns", len(result.summary_table.columns) if isinstance(result.summary_table, pd.DataFrame) else 0)
+            return f"The dataset contains **{rows:,} rows** and **{cols:,} columns**."
+        return result.formatted_result
+
+    elif op in ("schema", "columns_info", "data_types"):
+        if isinstance(result.summary_table, pd.DataFrame) and not result.summary_table.empty:
+            cols_preview = []
+            for _, r in result.summary_table.iterrows():
+                col_name = r.get("Column Name", r.iloc[0])
+                dtype = r.get("Data Type", r.iloc[1])
+                cols_preview.append(f"**{col_name}** (`{dtype}`)")
+            return f"The dataset has {len(result.summary_table)} columns: " + ", ".join(cols_preview) + "."
+        return result.formatted_result
 
     return result.formatted_result
