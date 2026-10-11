@@ -1,6 +1,6 @@
-# ⚡ AI Analytics Engineer
+# ⚡ AI Analytics Engine
 
-> **Ask questions. Get verified answers. Understand your data with mathematical precision.**
+> **Turn CSV datasets into insights with natural-language questions, transparent calculations, and interactive visualizations.**
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.30%2B-FF4B4B?style=flat-square&logo=streamlit)
