@@ -6,7 +6,7 @@
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.30%2B-FF4B4B?style=flat-square&logo=streamlit)
 ![Pandas](https://img.shields.io/badge/Pandas-2.0%2B-150458?style=flat-square&logo=pandas)
 ![Plotly](https://img.shields.io/badge/Plotly-5.18%2B-3F4F75?style=flat-square&logo=plotly)
-![Tests](https://img.shields.io/badge/Tests-30%20Passed-10B981?style=flat-square)
+![Tests](https://img.shields.io/badge/Tests-42%20Passed-10B981?style=flat-square)
 
 ---
 
@@ -199,7 +199,7 @@ Run the complete test suite with `pytest`:
 pytest -v
 ```
 
-All 30 unit and integration tests validate:
+All 42 unit and integration tests validate:
 - Statistical profiling and IQR outlier detection.
 - Mathematical accuracy of all supported analytical operations.
 - Input validation and defensive error handling for non-existent columns.
