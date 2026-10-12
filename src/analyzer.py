@@ -70,16 +70,20 @@ def apply_filters(df: pd.DataFrame, filters: Union[Dict[str, Any], List[Dict[str
     elif isinstance(filters, list):
         filter_list = filters
     else:
-        return filtered_df, filter_steps
+        raise ValueError(
+            f"Invalid filter format: expected a dictionary or list of dictionaries, got {type(filters).__name__}."
+        )
 
     for f in filter_list:
         if not isinstance(f, dict):
-            continue
+            raise ValueError(
+                f"Invalid filter condition: expected a dictionary, got {type(f).__name__}."
+            )
 
         raw_col = f.get("column")
         col = resolve_column_name(raw_col, df)
         if not col:
-            continue
+            raise ValueError(f"Filter column '{raw_col}' not found in dataset.")
 
         op = str(f.get("operator", "==")).strip().lower()
         val = f.get("value")
@@ -119,7 +123,7 @@ def apply_filters(df: pd.DataFrame, filters: Union[Dict[str, Any], List[Dict[str
             filter_steps.append(f"Filter where `{col}` <= {val}")
             filtered_df = filtered_df[mask]
         elif op in ("contains", "like"):
-            mask = series.astype(str).str.contains(str(val), case=False, na=False)
+            mask = series.astype(str).str.contains(str(val), case=False, na=False, regex=False)
             filter_steps.append(f"Filter where `{col}` contains '{val}'")
             filtered_df = filtered_df[mask]
         elif op in ("in", "isin"):
@@ -138,6 +142,8 @@ def apply_filters(df: pd.DataFrame, filters: Union[Dict[str, Any], List[Dict[str
             mask = series.notna()
             filter_steps.append(f"Filter where `{col}` is not null")
             filtered_df = filtered_df[mask]
+        else:
+            raise ValueError(f"Unsupported filter operator '{op}'.")
 
     return filtered_df, filter_steps
 

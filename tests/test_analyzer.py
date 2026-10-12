@@ -100,6 +100,55 @@ def test_filter_operation(test_df):
     assert set(res.summary_table.columns) == {"product", "revenue"}
 
 
+def test_filter_rejects_unknown_column(test_df):
+    """Invalid filter columns must not silently be ignored."""
+    engine = AnalyticsEngine(test_df)
+
+    res = engine.execute({
+        "operation": "filter",
+        "conditions": [
+            {"column": "regoin", "operator": "==", "value": "North"}
+        ]
+    })
+
+    assert res.success is False
+    assert "column" in res.error.lower()
+
+
+def test_filter_rejects_unknown_operator(test_df):
+    """Unsupported operators must return a clear error."""
+    engine = AnalyticsEngine(test_df)
+
+    res = engine.execute({
+        "operation": "filter",
+        "conditions": [
+            {"column": "region", "operator": "approximately", "value": "North"}
+        ]
+    })
+
+    assert res.success is False
+    assert "operator" in res.error.lower()
+
+
+def test_filter_contains_treats_input_as_literal_text(test_df):
+    """Regex metacharacters should be treated as literal search text."""
+    df = test_df.copy()
+    df["product"] = ["A.B", "AB", "A.B", "Widget", "A.B", "AB"]
+    engine = AnalyticsEngine(df)
+
+    res = engine.execute({
+        "operation": "filter",
+        "conditions": [
+            {"column": "product", "operator": "contains", "value": "."}
+        ]
+    })
+
+    assert res.success is True
+    assert len(res.summary_table) == 3
+    assert all(res.summary_table["product"] == "A.B")
+
+
+
 def test_correlation(test_df):
     """Test correlation computation between numerical columns."""
     engine = AnalyticsEngine(test_df)
